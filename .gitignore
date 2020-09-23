@@ -1,0 +1,8 @@
+/.idea
+/target
+Cargo.lock
+/iors-jvm/.idea/
+/iors-jvm/project/project
+/iors-jvm/project/target
+/iors-jvm/target
+.env
