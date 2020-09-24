@@ -1,6 +1,6 @@
 use jni::objects::{JFieldID, JMethodID};
 use jni::signature::{JavaType, Primitive};
-use jni::sys::jmethodID;
+use jni::sys::{jclass, jmethodID};
 use jni::{
     descriptors::Desc,
     objects::{GlobalRef, JClass, JObject, JThrowable},
@@ -47,6 +47,7 @@ struct Globals {
     tag: jfieldID,
     pure_value: jfieldID,
     pure_ctor: jmethodID,
+    pure_class: jclass,
     delay_thunk: jfieldID,
     raise_error_throwable: jfieldID,
     async_f: jfieldID,
@@ -124,6 +125,8 @@ impl Globals {
                 method "apply": "(Ljava/lang/Object;)Ljava/lang/Object;"
             );
 
+            let pure_class = class_objects.get("iors/IoRs$Pure").ok_or("no class for Pure")?.as_obj().into_inner();
+
             let class_objects = RefCell::new(class_objects);
 
             Ok(Globals {
@@ -131,6 +134,7 @@ impl Globals {
                 tag,
                 pure_value,
                 pure_ctor,
+                pure_class,
                 delay_thunk,
                 raise_error_throwable,
                 async_f,
@@ -266,11 +270,7 @@ fn pure<'a>(env: &'a JNIEnv, o: JObject) -> Result<JObject<'a>> {
     let globals = Globals::get().ok_or("globals not initialized")?;
 
     Ok(env.new_object_unchecked(
-        globals
-            .class_objects
-            .borrow()
-            .get("iors/IoRs$Pure")
-            .ok_or("no class for Pure")?,
+        JClass::from(globals.pure_class),
         globals.pure_ctor.into(),
         &[o.into()],
     )?)
