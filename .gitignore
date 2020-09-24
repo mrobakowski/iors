@@ -6,3 +6,4 @@ Cargo.lock
 /iors-jvm/project/target
 /iors-jvm/target
 .env
+*.log
