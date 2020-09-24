@@ -325,8 +325,7 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
             Tag::RaiseError => todo!(),
             Tag::Async => todo!(),
             Tag::Map => {
-                let source =
-                    get_map_source(&env, JObject::from(current.as_obj().into_inner())).unwrap();
+                let source = get_map_source(&env, current.as_obj().into_inner()).unwrap();
                 let bind = Bind::Map(
                     env.new_global_ref(get_map_f(&env, &current).unwrap())
                         .unwrap(),
@@ -335,9 +334,7 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
                 current = env.auto_local(source);
             }
             Tag::FlatMap => {
-                let source =
-                    get_flat_map_source(&env, JObject::from(current.as_obj().into_inner()))
-                        .unwrap();
+                let source = get_flat_map_source(&env, current.as_obj().into_inner()).unwrap();
                 let bind = Bind::FlatMap(
                     env.new_global_ref(get_flat_map_f(&env, &current).unwrap())
                         .unwrap(),
@@ -362,13 +359,7 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
                 Some(Bind::FlatMap(f)) => {
                     // todo: error handling
                     current = env.auto_local(
-                        call_function1(
-                            &env,
-                            // hack: potentially lifetime shenanigans
-                            JObject::from(f.as_obj().into_inner()),
-                            unwrapped_value,
-                        )
-                        .unwrap(),
+                        call_function1(&env, f.as_obj().into_inner(), unwrapped_value).unwrap(),
                     );
                 }
                 Some(Bind::Attempt) => unreachable!(),
