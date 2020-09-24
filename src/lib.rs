@@ -1,4 +1,4 @@
-use jni::objects::{AutoLocal, JFieldID, JMethodID};
+use jni::objects::{JFieldID, JMethodID};
 use jni::signature::{JavaType, Primitive};
 use jni::sys::jmethodID;
 use jni::{
@@ -165,9 +165,9 @@ impl Globals {
 
 macro_rules! getters {
     ($($getter_name:ident $(<$l:lifetime>)? -> $res:ty, $field_id:ident, $java_type:expr, $variant:ident;)*) => {$(
-        fn $getter_name$(<$l>)?(env: &$($l)? JNIEnv, io: impl Into<JObject$(<$l>)?>) -> Result<$res> {
+        fn $getter_name<$($l,)? 'x>(env: &$($l)? JNIEnv, io: impl Into<JObject<'x>>) -> Result<$res> {
             Ok(env
-                .get_field_unchecked(io.into(), Globals::$field_id()?, $java_type)?
+                .get_field_unchecked(io.into().into_inner(), Globals::$field_id()?, $java_type)?
                 .$variant()?
                 .try_into()?)
         }
@@ -186,10 +186,10 @@ getters! {
     get_flat_map_f<'a> -> JObject<'a>, flat_map_f, JavaType::Object("Lscala/Function1;".into()), l;
 }
 
-fn call_function0<'a>(env: &'a JNIEnv, f: impl Into<JObject<'a>>) -> Result<JObject<'a>> {
+fn call_function0<'a, 'f>(env: &'a JNIEnv, f: impl Into<JObject<'f>>) -> Result<JObject<'a>> {
     Ok(env
         .call_method_unchecked(
-            f.into(),
+            f.into().into_inner(),
             JMethodID::from(
                 Globals::get()
                     .ok_or("globals not initialized")?
@@ -201,14 +201,14 @@ fn call_function0<'a>(env: &'a JNIEnv, f: impl Into<JObject<'a>>) -> Result<JObj
         .l()?)
 }
 
-fn call_function1<'a, 'b>(
+fn call_function1<'a, 'f, 'x>(
     env: &'a JNIEnv,
-    f: impl Into<JObject<'a>>,
-    x: impl Into<JObject<'b>>,
+    f: impl Into<JObject<'f>>,
+    x: impl Into<JObject<'x>>,
 ) -> Result<JObject<'a>> {
     Ok(env
         .call_method_unchecked(
-            f.into(),
+            f.into().into_inner(),
             JMethodID::from(
                 Globals::get()
                     .ok_or("globals not initialized")?
@@ -251,7 +251,7 @@ enum Bind {
     Attempt,
 }
 
-fn right<'a>(env: &'a JNIEnv, o: JObject<'_>) -> Result<JObject<'a>> {
+fn right<'a>(env: &'a JNIEnv, o: JObject) -> Result<JObject<'a>> {
     Ok(env
         .call_static_method(
             "scala/util/Right",
@@ -262,7 +262,7 @@ fn right<'a>(env: &'a JNIEnv, o: JObject<'_>) -> Result<JObject<'a>> {
         .l()?)
 }
 
-fn pure<'a>(env: &'a JNIEnv, o: JObject<'_>) -> Result<JObject<'a>> {
+fn pure<'a>(env: &'a JNIEnv, o: JObject) -> Result<JObject<'a>> {
     let globals = Globals::get().ok_or("globals not initialized")?;
 
     Ok(env.new_object_unchecked(
@@ -315,7 +315,7 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
             Tag::RaiseError => todo!(),
             Tag::Async => todo!(),
             Tag::Map => {
-                let source = get_map_source(&env, current.as_obj().into_inner()).unwrap();
+                let source = get_map_source(&env, &current).unwrap();
                 let bind = Bind::Map(
                     env.new_global_ref(get_map_f(&env, &current).unwrap())
                         .unwrap(),
@@ -324,7 +324,7 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
                 current = env.auto_local(source);
             }
             Tag::FlatMap => {
-                let source = get_flat_map_source(&env, current.as_obj().into_inner()).unwrap();
+                let source = get_flat_map_source(&env, &current).unwrap();
                 let bind = Bind::FlatMap(
                     env.new_global_ref(get_flat_map_f(&env, &current).unwrap())
                         .unwrap(),
@@ -348,9 +348,7 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
                 }
                 Some(Bind::FlatMap(f)) => {
                     // todo: error handling
-                    current = env.auto_local(
-                        call_function1(&env, f.as_obj().into_inner(), unwrapped_value).unwrap(),
-                    );
+                    current = env.auto_local(call_function1(&env, &f, unwrapped_value).unwrap());
                 }
                 Some(Bind::Attempt) => unreachable!(),
             }
