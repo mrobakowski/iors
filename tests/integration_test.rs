@@ -1,21 +1,24 @@
+use jni::objects::JObject;
 use jni::{Executor, InitArgsBuilder, JavaVM};
 use once_cell::sync::Lazy;
 use std::{path::PathBuf, sync::Arc};
 
-static IORS_PATH: Lazy<PathBuf> = Lazy::new(|| test_cdylib::build_current_project());
+static IORS_PATH: Lazy<PathBuf> = Lazy::new(test_cdylib::build_current_project);
 
 #[test]
 fn jni_works() {
-    let opt = format!(
+    let lib_path = format!(
         "-Djava.library.path={}",
         IORS_PATH.parent().unwrap().to_string_lossy(),
     );
-    dbg!(&opt);
+    let jar_path = "-Djava.class.path=./iors-jvm/target/scala-2.13/iors-jvm-assembly-0.1.jar";
+
     let jvm = Arc::new(
         JavaVM::new(
             InitArgsBuilder::new()
-                .option(&opt)
-                .option("-Djava.class.path=./iors-jvm/target/scala-2.13/iors-jvm-assembly-0.1.jar")
+                .option(&lib_path)
+                .option(jar_path)
+                .option("-Xcheck:jni")
                 .build()
                 .unwrap(),
         )
@@ -25,10 +28,15 @@ fn jni_works() {
 
     executor
         .with_attached(|env| {
-            env.call_static_method("iors/IoRs", "printVersion", "()V", &[])
-                .unwrap()
-                .v()
-                .unwrap();
+            env.call_static_method(
+                "iors/IoRs",
+                "main",
+                "([Ljava/lang/String;)V",
+                &[JObject::null().into()],
+            )
+            .unwrap()
+            .v()
+            .unwrap();
 
             Ok(())
         })
