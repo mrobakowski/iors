@@ -241,18 +241,8 @@ extern "system" fn JNI_OnUnload(jvm: *mut sys::JavaVM, _reserved: *const ()) {
 }
 
 #[export_name = "Java_iors_IoRs_00024_printVersion"]
-extern "system" fn print_version(env: JNIEnv, this: JObject) {
-    let clazz = env.get_object_class(this).unwrap();
-    let name = env
-        .call_method(clazz, "getName", "()Ljava/lang/String;", &[])
-        .unwrap()
-        .l()
-        .unwrap();
-    let name = env.get_string(name.into()).unwrap();
-    let name = name.to_string_lossy();
-
+extern "system" fn print_version(_env: JNIEnv, _this: JObject) {
     println!("iors ver. {}", env!("CARGO_PKG_VERSION"));
-    println!("this has type: {}", name);
 }
 
 enum Bind {
