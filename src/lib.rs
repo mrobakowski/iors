@@ -1,19 +1,75 @@
-use jni::objects::{JFieldID, JMethodID};
-use jni::signature::{JavaType, Primitive};
-use jni::sys::{jclass, jmethodID};
 use jni::{
     descriptors::Desc,
-    objects::{GlobalRef, JClass, JObject, JThrowable},
-    sys::{self, jfieldID},
+    objects::{GlobalRef, JClass, JFieldID, JMethodID, JObject, JThrowable},
+    signature::{JavaType, Primitive},
+    sys::{self, jclass, jfieldID, jmethodID},
     JNIEnv, JNIVersion, JavaVM,
 };
 use once_cell::sync::OnceCell;
-use std::cell::RefCell;
-use std::convert::TryInto;
-use std::ops::DerefMut;
-use std::{collections::HashMap, convert::TryFrom, error::Error};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    convert::{TryFrom, TryInto},
+    error::Error,
+    ops::DerefMut,
+};
 
-type Result<T, E = Box<dyn Error>> = std::result::Result<T, E>;
+type Result<T, E = Box<dyn Error + 'static>> = std::result::Result<T, E>;
+
+enum JvmResult<'a, T> {
+    Value(T),
+    Exception(JThrowable<'a>),
+}
+
+impl<'a, T> JvmResult<'a, T> {
+    fn map<R>(self, f: impl FnOnce(T) -> R) -> JvmResult<'a, R> {
+        match self {
+            JvmResult::Value(t) => JvmResult::Value(f(t)),
+            JvmResult::Exception(e) => JvmResult::Exception(e),
+        }
+    }
+}
+
+trait ResultExt<T> {
+    fn check_exception<'a>(self, env: &'a JNIEnv<'a>) -> Result<JvmResult<'a, T>>;
+}
+
+impl<T> ResultExt<T> for Result<T> {
+    fn check_exception<'a>(self, env: &'a JNIEnv<'a>) -> Result<JvmResult<'a, T>> {
+        match self {
+            Ok(t) => Ok(JvmResult::Value(t)),
+            Err(e) => match e.downcast::<jni::errors::Error>() {
+                Ok(jni_err) => {
+                    if let &jni::errors::ErrorKind::JavaException = jni_err.kind() {
+                        let exc = env.exception_occurred()?;
+                        env.exception_clear()?;
+                        Ok(JvmResult::Exception(exc))
+                    } else {
+                        Err(jni_err.into())
+                    }
+                }
+                Err(e) => Err(e),
+            },
+        }
+    }
+}
+
+impl<T> ResultExt<T> for jni::errors::Result<T> {
+    fn check_exception<'a>(self, env: &'a JNIEnv<'a>) -> Result<JvmResult<'a, T>> {
+        match self {
+            Ok(t) => Ok(JvmResult::Value(t)),
+            Err(e) => {
+                if let &jni::errors::ErrorKind::JavaException = e.kind() {
+                    let exc = env.exception_occurred()?;
+                    env.exception_clear()?;
+                    return Ok(JvmResult::Exception(exc));
+                }
+
+                Err(e.into())
+            }
+        }
+    }
+}
 
 #[repr(i32)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -50,6 +106,8 @@ struct Globals {
     pure_class: jclass,
     delay_thunk: jfieldID,
     raise_error_throwable: jfieldID,
+    raise_error_class: jclass,
+    raise_error_ctor: jmethodID,
     async_f: jfieldID,
     map_source: jfieldID,
     map_f: jfieldID,
@@ -104,8 +162,9 @@ impl Globals {
                 method "<init>": "(Ljava/lang/Object;)V"
             );
             let delay_thunk = cache_class_and_get_id!("iors/IoRs$Delay"; field "thunk": "Lscala/Function0;");
-            let raise_error_throwable = cache_class_and_get_id!("iors/IoRs$RaiseError"; 
-                field "throwable": "Ljava/lang/Throwable;"
+            let (raise_error_throwable, raise_error_ctor) = cache_class_and_get_id!("iors/IoRs$RaiseError"; 
+                field "throwable": "Ljava/lang/Throwable;",
+                method "<init>": "(Ljava/lang/Throwable;)V"
             );
             let async_f = cache_class_and_get_id!("iors/IoRs$Async"; field "f": "Lscala/Function1;");
             let (map_source, map_f) = cache_class_and_get_id!("iors/IoRs$Map";
@@ -126,6 +185,7 @@ impl Globals {
             );
 
             let pure_class = class_objects.get("iors/IoRs$Pure").ok_or("no class for Pure")?.as_obj().into_inner();
+            let raise_error_class = class_objects.get("hava/lang/Throwable").ok_or("no class for Throwable")?.as_obj().into_inner();
 
             let class_objects = RefCell::new(class_objects);
 
@@ -137,6 +197,8 @@ impl Globals {
                 pure_class,
                 delay_thunk,
                 raise_error_throwable,
+                raise_error_ctor,
+                raise_error_class,
                 async_f,
                 map_source,
                 map_f,
@@ -163,7 +225,8 @@ impl Globals {
         map_source,
         map_f,
         flat_map_source,
-        flat_map_f
+        flat_map_f,
+        attempt_source
     }
 }
 
@@ -188,40 +251,50 @@ getters! {
     get_map_f<'a> -> JObject<'a>, map_f, JavaType::Object("Lscala/Function1;".into()), l;
     get_flat_map_source<'a> -> JObject<'a>, flat_map_source, JavaType::Object("Liors/IoRs;".into()), l;
     get_flat_map_f<'a> -> JObject<'a>, flat_map_f, JavaType::Object("Lscala/Function1;".into()), l;
+    get_attempt_source<'a> -> JObject<'a>, attempt_source, JavaType::Object("Liors/IoRs;".into()), l;
 }
 
-fn call_function0<'a, 'f>(env: &'a JNIEnv, f: impl Into<JObject<'f>>) -> Result<JObject<'a>> {
-    Ok(env
-        .call_method_unchecked(
-            f.into().into_inner(),
-            JMethodID::from(
-                Globals::get()
-                    .ok_or("globals not initialized")?
-                    .function0_apply,
-            ),
-            JavaType::Object("Ljava/lang/Object;".into()),
-            &[],
-        )?
-        .l()?)
+fn call_function0<'a, 'f>(
+    env: &'a JNIEnv,
+    f: impl Into<JObject<'f>>,
+) -> Result<JvmResult<'a, JObject<'a>>> {
+    let res = (|| -> Result<_> {
+        Ok(env
+            .call_method_unchecked(
+                f.into().into_inner(),
+                JMethodID::from(
+                    Globals::get()
+                        .ok_or("globals not initialized")?
+                        .function0_apply,
+                ),
+                JavaType::Object("Ljava/lang/Object;".into()),
+                &[],
+            )?
+            .l()?)
+    })();
+    Ok(res.check_exception(env)?)
 }
 
 fn call_function1<'a, 'f, 'x>(
     env: &'a JNIEnv,
     f: impl Into<JObject<'f>>,
     x: impl Into<JObject<'x>>,
-) -> Result<JObject<'a>> {
-    Ok(env
-        .call_method_unchecked(
-            f.into().into_inner(),
-            JMethodID::from(
-                Globals::get()
-                    .ok_or("globals not initialized")?
-                    .function1_apply,
-            ),
-            JavaType::Object("Ljava/lang/Object;".into()),
-            &[x.into().into()],
-        )?
-        .l()?)
+) -> Result<JvmResult<'a, JObject<'a>>> {
+    let res: Result<_> = (|| -> Result<_> {
+        Ok(env
+            .call_method_unchecked(
+                f.into().into_inner(),
+                JMethodID::from(
+                    Globals::get()
+                        .ok_or("globals not initialized")?
+                        .function1_apply,
+                ),
+                JavaType::Object("Ljava/lang/Object;".into()),
+                &[x.into().into()],
+            )?
+            .l()?)
+    })();
+    Ok(res.check_exception(env)?)
 }
 
 #[no_mangle]
@@ -249,6 +322,7 @@ extern "system" fn print_version(_env: JNIEnv, _this: JObject) {
     println!("iors ver. {}", env!("CARGO_PKG_VERSION"));
 }
 
+// todo: maybe it's worth to have two versions of this - with GlobalRefs and with AutoRefs
 enum Bind {
     Map(GlobalRef),
     FlatMap(GlobalRef),
@@ -276,41 +350,39 @@ fn pure<'a>(env: &'a JNIEnv, o: JObject) -> Result<JObject<'a>> {
     )?)
 }
 
+fn raise_error<'a>(env: &'a JNIEnv, o: JThrowable) -> Result<JObject<'a>> {
+    let globals = Globals::get().ok_or("globals not initialized")?;
+
+    Ok(env.new_object_unchecked(
+        JClass::from(globals.raise_error_class),
+        globals.raise_error_ctor.into(),
+        &[o.into()],
+    )?)
+}
+
 #[export_name = "Java_iors_IoRs_unsafeRunAsync"]
 extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
     let mut current = env.auto_local(io);
     let mut stack = vec![];
 
-    let next_bind = |stack: &mut Vec<Bind>| {
-        let mut last = stack.pop();
-        while let Some(Bind::Attempt) = last {
-            last = stack.pop();
-        }
-        last
-    };
-
-    let next_handler = |stack: &mut Vec<Bind>| {
-        let mut last = stack.pop();
-        while let Some(Bind::Map(_)) | Some(Bind::FlatMap(_)) = last {
-            last = stack.pop();
-        }
-        last
-    };
-
     loop {
         let tag = get_tag(&env, &current).unwrap();
-        let mut unwrapped_value = JObject::null();
-        let mut has_unwrapped_value = false;
+        let mut unwrapped_value = None;
         match tag {
             Tag::Pure => {
-                unwrapped_value = get_pure_value(&env, &current).unwrap();
-                has_unwrapped_value = true;
+                unwrapped_value = Some(get_pure_value(&env, &current).unwrap());
             }
             Tag::Delay => {
                 let thunk = get_delay_thunk(&env, &current).unwrap();
-                // todo: error handling
-                unwrapped_value = call_function0(&env, thunk).unwrap();
-                has_unwrapped_value = true;
+                let thunk_res = call_function0(&env, thunk).unwrap();
+                match thunk_res {
+                    JvmResult::Value(value) => {
+                        unwrapped_value = Some(value);
+                    }
+                    JvmResult::Exception(exc) => {
+                        current = env.auto_local(raise_error(&env, exc).unwrap());
+                    }
+                }
             }
             Tag::RaiseError => todo!(),
             Tag::Async => todo!(),
@@ -332,25 +404,41 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
                 stack.push(bind);
                 current = env.auto_local(source);
             }
-            Tag::Attempt => todo!(),
+            Tag::Attempt => {
+                let source = get_attempt_source(&env, &current).unwrap();
+                stack.push(Bind::Attempt);
+                current = env.auto_local(source);
+            }
         }
 
-        if has_unwrapped_value {
-            match next_bind(&mut stack) {
+        if let Some(unwrapped_value) = unwrapped_value {
+            match stack.pop() {
                 None => {
                     call_function1(&env, callback, right(&env, unwrapped_value).unwrap()).unwrap();
                     break;
                 }
                 Some(Bind::Map(f)) => {
-                    let new_value = call_function1(&env, &f, unwrapped_value).unwrap();
-                    // todo: error handling
-                    current = env.auto_local(pure(&env, new_value).unwrap());
+                    let f_res = call_function1(&env, &f, unwrapped_value).unwrap();
+                    let next_io = match f_res {
+                        // f: value -> value, so we need to wrap in a pure
+                        JvmResult::Value(new_value) => pure(&env, new_value).unwrap(),
+                        JvmResult::Exception(exc) => raise_error(&env, exc).unwrap(),
+                    };
+                    current = env.auto_local(next_io);
                 }
                 Some(Bind::FlatMap(f)) => {
-                    // todo: error handling
-                    current = env.auto_local(call_function1(&env, &f, unwrapped_value).unwrap());
+                    let f_res = call_function1(&env, &f, unwrapped_value).unwrap();
+                    let next_io = match f_res {
+                        // f: value -> io, so we just pass it along
+                        JvmResult::Value(new_value) => new_value,
+                        JvmResult::Exception(exc) => raise_error(&env, exc).unwrap(),
+                    };
+                    current = env.auto_local(next_io);
                 }
-                Some(Bind::Attempt) => unreachable!(),
+                Some(Bind::Attempt) => {
+                    current =
+                        env.auto_local(pure(&env, right(&env, unwrapped_value).unwrap()).unwrap());
+                }
             }
         }
     }
