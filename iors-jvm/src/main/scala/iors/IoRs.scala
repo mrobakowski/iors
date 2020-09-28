@@ -1,12 +1,21 @@
 package iors
 
+import java.util.concurrent.ArrayBlockingQueue
+
 import IoRs.Tag
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 
+
 abstract sealed class IoRs[+A](val tag: Tag) {
   @native def unsafeRunAsync(cb: Either[Throwable, A] => ())
+
+  def unsafeRunSync(): Either[Throwable, A] = {
+    val queue = new ArrayBlockingQueue[Either[Throwable, A]](1)
+    unsafeRunAsync(queue.put)
+    queue.take()
+  }
 
   def map[B](f: A => B): IoRs[B] = IoRs.Map(this, f)
 
@@ -40,9 +49,8 @@ object IoRs {
 
     } yield x + y
 
-    io.unsafeRunAsync { res =>
-      println(s"The result of the io is $res")
-    }
+    val res = io.unsafeRunSync()
+    println(s"The result of the io is $res")
 
     Thread.sleep(100);
   }
