@@ -51,8 +51,6 @@ object IoRs {
 
     val res = io.unsafeRunSync()
     println(s"The result of the io is $res")
-
-    Thread.sleep(100);
   }
 
   def pure[A](value: A): IoRs[A] = IoRs.Pure(value)
