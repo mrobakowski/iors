@@ -185,7 +185,7 @@ impl Globals {
             );
 
             let pure_class = class_objects.get("iors/IoRs$Pure").ok_or("no class for Pure")?.as_obj().into_inner();
-            let raise_error_class = class_objects.get("hava/lang/Throwable").ok_or("no class for Throwable")?.as_obj().into_inner();
+            let raise_error_class = class_objects.get("iors/IoRs$RaiseError").ok_or("no class for RaiseError")?.as_obj().into_inner();
 
             let class_objects = RefCell::new(class_objects);
 
@@ -329,10 +329,22 @@ enum Bind {
     Attempt,
 }
 
+// todo: cache left and right
 fn right<'a>(env: &'a JNIEnv, o: JObject) -> Result<JObject<'a>> {
     Ok(env
         .call_static_method(
             "scala/util/Right",
+            "apply",
+            "(Ljava/lang/Object;)Lscala/util/Right;",
+            &[o.into()],
+        )?
+        .l()?)
+}
+
+fn left<'a>(env: &'a JNIEnv, o: JObject) -> Result<JObject<'a>> {
+    Ok(env
+        .call_static_method(
+            "scala/util/Left",
             "apply",
             "(Ljava/lang/Object;)Lscala/util/Right;",
             &[o.into()],
@@ -366,6 +378,7 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
     let mut stack = vec![];
 
     loop {
+        // todo: loop jni frame that returns new current
         let tag = get_tag(&env, &current).unwrap();
         let mut unwrapped_value = None;
         match tag {
@@ -384,7 +397,29 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
                     }
                 }
             }
-            Tag::RaiseError => todo!(),
+            Tag::RaiseError => {
+                let exc = get_raise_error_throwable(&env, &current).unwrap();
+                let wrapped = left(&env, exc.into()).unwrap();
+
+                let mut attempt_bind = stack.pop();
+                while let Some(Bind::Map(_)) | Some(Bind::FlatMap(_)) = attempt_bind {
+                    attempt_bind = stack.pop()
+                }
+
+                match attempt_bind {
+                    None => {
+                        // we've reached the top of the callstack, let's fire the callback
+                        // we ignore the result of that so we don't panic on java exception
+                        call_function1(&env, callback, wrapped);
+                        return;
+                    }
+                    Some(_) => {
+                        // we've reached an attempt frame, so the next frames expect Left with
+                        // the error
+                        current = env.auto_local(pure(&env, wrapped).unwrap());
+                    }
+                }
+            }
             Tag::Async => todo!(),
             Tag::Map => {
                 let source = get_map_source(&env, &current).unwrap();
@@ -414,7 +449,8 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
         if let Some(unwrapped_value) = unwrapped_value {
             match stack.pop() {
                 None => {
-                    call_function1(&env, callback, right(&env, unwrapped_value).unwrap()).unwrap();
+                    // we ignore the result of that so we don't panic on java exception
+                    let _ = call_function1(&env, callback, right(&env, unwrapped_value).unwrap());
                     break;
                 }
                 Some(Bind::Map(f)) => {
