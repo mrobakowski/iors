@@ -1,6 +1,7 @@
+use crate::closure::make_rust_closure;
 use jni::{
     descriptors::Desc,
-    objects::{GlobalRef, JClass, JFieldID, JMethodID, JObject, JThrowable},
+    objects::{GlobalRef, JClass, JFieldID, JMethodID, JObject, JStaticMethodID, JThrowable},
     signature::{JavaType, Primitive},
     sys::{self, jclass, jfieldID, jmethodID},
     JNIEnv, JNIVersion, JavaVM,
@@ -14,20 +15,13 @@ use std::{
     ops::DerefMut,
 };
 
+mod closure;
+
 type Result<T, E = Box<dyn Error + 'static>> = std::result::Result<T, E>;
 
 enum JvmResult<'a, T> {
     Value(T),
     Exception(JThrowable<'a>),
-}
-
-impl<'a, T> JvmResult<'a, T> {
-    fn map<R>(self, f: impl FnOnce(T) -> R) -> JvmResult<'a, R> {
-        match self {
-            JvmResult::Value(t) => JvmResult::Value(f(t)),
-            JvmResult::Exception(e) => JvmResult::Exception(e),
-        }
-    }
 }
 
 trait ResultExt<T> {
@@ -40,7 +34,7 @@ impl<T> ResultExt<T> for Result<T> {
             Ok(t) => Ok(JvmResult::Value(t)),
             Err(e) => match e.downcast::<jni::errors::Error>() {
                 Ok(jni_err) => {
-                    if let &jni::errors::ErrorKind::JavaException = jni_err.kind() {
+                    if let jni::errors::ErrorKind::JavaException = jni_err.kind() {
                         let exc = env.exception_occurred()?;
                         env.exception_clear()?;
                         Ok(JvmResult::Exception(exc))
@@ -59,7 +53,7 @@ impl<T> ResultExt<T> for jni::errors::Result<T> {
         match self {
             Ok(t) => Ok(JvmResult::Value(t)),
             Err(e) => {
-                if let &jni::errors::ErrorKind::JavaException = e.kind() {
+                if let jni::errors::ErrorKind::JavaException = e.kind() {
                     let exc = env.exception_occurred()?;
                     env.exception_clear()?;
                     return Ok(JvmResult::Exception(exc));
@@ -73,7 +67,7 @@ impl<T> ResultExt<T> for jni::errors::Result<T> {
 
 #[repr(i32)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-enum Tag {
+pub enum Tag {
     Pure = 0,
     Delay = 1,
     RaiseError = 2,
@@ -87,7 +81,7 @@ impl TryFrom<i32> for Tag {
     type Error = &'static str;
 
     fn try_from(value: i32) -> Result<Self, Self::Error> {
-        if value < 0 || value > 5 {
+        if value < 0 || value > 6 {
             Err("invalid tag value")
         } else {
             Ok(unsafe { std::mem::transmute(value) })
@@ -101,6 +95,8 @@ struct Globals {
     class_objects: RefCell<HashMap<&'static str, GlobalRef>>,
     // fields and methods from iors
     tag: jfieldID,
+    iors_class: jclass,
+    iors_from_either: jmethodID,
     pure_value: jfieldID,
     pure_ctor: jmethodID,
     pure_class: jclass,
@@ -153,10 +149,16 @@ impl Globals {
                 };
                 (@do method, $class:ident, $name:literal, $sig:literal) => {
                     env.get_method_id(&$class, $name, $sig)?.into_inner()
+                };
+                (@do static_method, $class:ident, $name:literal, $sig:literal) => {
+                    env.get_static_method_id(&$class, $name, $sig)?.into_inner()
                 }
             }
 
-            let tag = cache_class_and_get_id!("iors/IoRs"; field "tag": "I");
+            let (tag, iors_from_either) = cache_class_and_get_id!("iors/IoRs"; 
+                field "tag": "I",
+                static_method "fromEither": "(Lscala/util/Either;)Liors/IoRs;"
+            );
             let (pure_value, pure_ctor) = cache_class_and_get_id!("iors/IoRs$Pure"; 
                 field "value": "Ljava/lang/Object;",
                 method "<init>": "(Ljava/lang/Object;)V"
@@ -185,6 +187,7 @@ impl Globals {
             );
 
             let pure_class = class_objects.get("iors/IoRs$Pure").ok_or("no class for Pure")?.as_obj().into_inner();
+            let iors_class = class_objects.get("iors/IoRs").ok_or("no class for IoRs")?.as_obj().into_inner();
             let raise_error_class = class_objects.get("iors/IoRs$RaiseError").ok_or("no class for RaiseError")?.as_obj().into_inner();
 
             let class_objects = RefCell::new(class_objects);
@@ -192,6 +195,8 @@ impl Globals {
             Ok(Globals {
                 class_objects,
                 tag,
+                iors_class,
+                iors_from_either,
                 pure_value,
                 pure_ctor,
                 pure_class,
@@ -346,7 +351,7 @@ fn left<'a>(env: &'a JNIEnv, o: JObject) -> Result<JObject<'a>> {
         .call_static_method(
             "scala/util/Left",
             "apply",
-            "(Ljava/lang/Object;)Lscala/util/Right;",
+            "(Ljava/lang/Object;)Lscala/util/Left;",
             &[o.into()],
         )?
         .l()?)
@@ -372,10 +377,27 @@ fn raise_error<'a>(env: &'a JNIEnv, o: JThrowable) -> Result<JObject<'a>> {
     )?)
 }
 
+fn iors_from_either<'a, 'b>(env: &'a JNIEnv<'a>, either: JObject<'b>) -> Result<JObject<'a>> {
+    let globals = Globals::get().ok_or("globals not initialized")?;
+
+    Ok(env
+        .call_static_method_unchecked(
+            JClass::from(globals.iors_class),
+            JStaticMethodID::from(globals.iors_from_either),
+            JavaType::Object("Liors/IoRs;".into()),
+            &[either.into()],
+        )?
+        .l()?)
+}
+
 #[export_name = "Java_iors_IoRs_unsafeRunAsync"]
 extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
+    let callback = env.new_global_ref(callback).unwrap();
+    eval_loop_with_stack(env, io, callback, vec![]);
+}
+
+fn eval_loop_with_stack(env: JNIEnv, io: JObject, callback: GlobalRef, mut stack: Vec<Bind>) {
     let mut current = env.auto_local(io);
-    let mut stack = vec![];
 
     loop {
         // todo: loop jni frame that returns new current
@@ -410,7 +432,7 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
                     None => {
                         // we've reached the top of the callstack, let's fire the callback
                         // we ignore the result of that so we don't panic on java exception
-                        call_function1(&env, callback, wrapped);
+                        let _ = call_function1(&env, &callback, wrapped);
                         return;
                     }
                     Some(_) => {
@@ -420,7 +442,21 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
                     }
                 }
             }
-            Tag::Async => todo!(),
+            Tag::Async => {
+                let f = get_async_f(&env, &current).unwrap();
+                let async_cb = make_rust_closure(&env, move |env, async_result| {
+                    // the JObject dance is due to the borrowchk, but I'm pretty sure this is safe
+                    let io =
+                        JObject::from(iors_from_either(&env, async_result).unwrap().into_inner());
+                    eval_loop_with_stack(env, io, callback, stack)
+                })
+                .unwrap();
+                match call_function1(&env, f, async_cb).unwrap() {
+                    JvmResult::Value(_) => {}
+                    JvmResult::Exception(_) => {}
+                }
+                return;
+            }
             Tag::Map => {
                 let source = get_map_source(&env, &current).unwrap();
                 let bind = Bind::Map(
@@ -450,7 +486,7 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
             match stack.pop() {
                 None => {
                     // we ignore the result of that so we don't panic on java exception
-                    let _ = call_function1(&env, callback, right(&env, unwrapped_value).unwrap());
+                    let _ = call_function1(&env, &callback, right(&env, unwrapped_value).unwrap());
                     break;
                 }
                 Some(Bind::Map(f)) => {
@@ -478,6 +514,4 @@ extern "system" fn eval_loop(env: JNIEnv, io: JObject, callback: JObject) {
             }
         }
     }
-
-    println!("Hello from the eval loop!")
 }
