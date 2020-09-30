@@ -10,7 +10,7 @@
  **BUT**, after thinking about this more, this will obviously inhibit some of JVM's JIT optimizations, so it can 
  actually end up _slower_. Who knows.
  
- Benchmarks soon.
+ Benchmarks are shamelessly stolen from [cats-effect](https://github.com/typelevel/cats-effect/tree/series/2.x/benchmarks/shared/src/main/scala/cats/effect/benchmarks).
  
  ## Why?
  idk

@@ -30,6 +30,6 @@ object IoRsTests {
     val res = io.unsafeRunSync()
     println(s"The result of the io is $res")
 
-    res.toTry.get
+    res
   }
 }

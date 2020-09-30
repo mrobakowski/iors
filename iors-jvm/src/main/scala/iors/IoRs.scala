@@ -5,14 +5,15 @@ import java.util.concurrent.ArrayBlockingQueue
 import iors.IoRs.Tag
 
 import scala.annotation.unused
+import scala.concurrent.ExecutionContext
 
 abstract sealed class IoRs[+A] private(private val tag: Tag) {
   @native def unsafeRunAsync(/* actually used, but the lint fires here */ @unused cb: Either[Throwable, A] => ()): Unit
 
-  def unsafeRunSync(): Either[Throwable, A] = {
+  def unsafeRunSync(): A = {
     val queue = new ArrayBlockingQueue[Either[Throwable, A]](1)
     unsafeRunAsync(queue.put)
-    queue.take()
+    queue.take().toTry.get
   }
 
   def map[B](f: A => B): IoRs[B] = IoRs.Map(this, f)
@@ -20,9 +21,15 @@ abstract sealed class IoRs[+A] private(private val tag: Tag) {
   def flatMap[B](f: A => IoRs[B]): IoRs[B] = IoRs.FlatMap(this, f)
 
   def attempt: IoRs[Either[Throwable, A]] = IoRs.Attempt(this)
+
+  def handleErrorWith[AA >: A](handler: Throwable => IoRs[AA]): IoRs[AA] = attempt.flatMap {
+    case Left(exc) => handler(exc)
+    case Right(value) => IoRs.pure(value)
+  }
 }
 
 object IoRs {
+
   System.loadLibrary("iors")
 
   @native def printVersion(): Unit
@@ -36,6 +43,10 @@ object IoRs {
   def raiseError[A](throwable: Throwable): IoRs[A] = IoRs.RaiseError(throwable)
 
   def async[A](f: (Either[Throwable, A] => ()) => ()): IoRs[A] = IoRs.Async(f)
+
+  def shift(implicit ec: ExecutionContext): IoRs[Unit] = async { cb =>
+    ec.execute { () => cb(Right(())) }
+  }
 
   def fromEither[A](either: Either[Throwable, A]): IoRs[A] = {
     either match {
