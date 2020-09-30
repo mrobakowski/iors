@@ -1,4 +1,4 @@
-use crate::closure::make_rust_closure;
+use crate::closure::make_ffi_closure;
 use jni::{
     descriptors::Desc,
     objects::{GlobalRef, JClass, JFieldID, JMethodID, JObject, JStaticMethodID, JThrowable},
@@ -444,7 +444,7 @@ fn eval_loop_with_stack(env: JNIEnv, io: JObject, callback: GlobalRef, mut stack
             }
             Tag::Async => {
                 let f = get_async_f(&env, &current).unwrap();
-                let async_cb = make_rust_closure(&env, move |env, async_result| {
+                let async_cb = make_ffi_closure(&env, move |env, async_result| {
                     // the JObject dance is due to the borrowchk, but I'm pretty sure this is safe
                     let io =
                         JObject::from(iors_from_either(&env, async_result).unwrap().into_inner());

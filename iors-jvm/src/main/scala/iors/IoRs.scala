@@ -2,14 +2,12 @@ package iors
 
 import java.util.concurrent.ArrayBlockingQueue
 
-import IoRs.Tag
+import iors.IoRs.Tag
 
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.Future
+import scala.annotation.unused
 
-
-abstract sealed class IoRs[+A](val tag: Tag) {
-  @native def unsafeRunAsync(cb: Either[Throwable, A] => ())
+abstract sealed class IoRs[+A] private(private val tag: Tag) {
+  @native def unsafeRunAsync(/* actually used, but the lint fires here */ @unused cb: Either[Throwable, A] => ()): Unit
 
   def unsafeRunSync(): Either[Throwable, A] = {
     val queue = new ArrayBlockingQueue[Either[Throwable, A]](1)
@@ -27,31 +25,7 @@ abstract sealed class IoRs[+A](val tag: Tag) {
 object IoRs {
   System.loadLibrary("iors")
 
-  @native def printVersion()
-
-  def main(args: Array[String]): () = {
-    val io = for {
-      x <- IoRs.pure(42)
-      _ <- IoRs {
-        println("Hello from iors!")
-        printVersion()
-      }
-      e <- IoRs.raiseError[Int](new RuntimeException("foo")).attempt
-      _ <- IoRs {
-        println(s"the error is: $e")
-      }
-      y <- IoRs.async[Int] { cb =>
-        val fut = Future {
-          println("Hello from scala future!")
-        }
-        fut.onComplete(t => cb(t.toEither.map(_ => 69)))
-      }
-
-    } yield x + y
-
-    val res = io.unsafeRunSync()
-    println(s"The result of the io is $res")
-  }
+  @native def printVersion(): Unit
 
   def pure[A](value: A): IoRs[A] = IoRs.Pure(value)
 
@@ -69,7 +43,6 @@ object IoRs {
       case Right(value) => Pure(value)
     }
   }
-
 
   private[iors] case class Tag(underlying: Int) extends AnyVal
 
@@ -97,13 +70,12 @@ object IoRs {
 
   private[iors] final case class Attempt[+A](source: IoRs[A]) extends IoRs[Either[Throwable, A]](Tag.Attempt)
 
-  private[iors] final class RustClosure[-A](private var nativePointer: Long) extends (A => ()) {
-    @native def doApply(v: A)
+  private[iors] final class FfiClosure[-A](private var nativePointer: Long) extends (A => ()) {
+    @native def doApply(/* actually used, but the lint fires here */ @unused v: A): Unit
 
     override def apply(v: A): Unit = doApply(v)
 
-    @native
-    override def finalize(): Unit
+    @native override def finalize(): Unit
   }
 
 }

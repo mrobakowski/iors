@@ -1,11 +1,8 @@
 #![feature(bool_to_option)]
 
-use jni::objects::JObject;
 use jni::{Executor, InitArgsBuilder, JavaVM};
 use once_cell::sync::Lazy;
-use std::ops::Deref;
-use std::process::Command;
-use std::{env, path::PathBuf, sync::Arc};
+use std::{env, ops::Deref, path::PathBuf, process::Command, sync::Arc};
 
 static IORS_PATH: Lazy<PathBuf> = Lazy::new(test_cdylib::build_current_project);
 static JAR_PATH: Lazy<PathBuf> = Lazy::new(|| {
@@ -25,15 +22,13 @@ static JAR_PATH: Lazy<PathBuf> = Lazy::new(|| {
         p.to_string_lossy().to_string()
     });
 
-    println!("Building iors-jvm...");
     Command::new(java)
-        .args(&["-jar", &sbt_path, "assembly"])
+        .args(&["-jar", &sbt_path, "test:assembly"])
         .current_dir("./iors-jvm")
         .status()
         .unwrap();
-    println!("iors-jvm built!");
 
-    PathBuf::from("./iors-jvm/target/scala-2.13/iors-jvm-assembly-0.1.jar")
+    PathBuf::from("./iors-jvm/target/scala-2.13/iors-jvm-test-0.1.jar")
 });
 
 #[test]
@@ -57,19 +52,13 @@ fn jni_works() {
     );
     let executor = Executor::new(jvm);
 
-    executor
+    let res = executor
         .with_attached(|env| {
-            env.call_static_method(
-                "iors/IoRs",
-                "main",
-                "([Ljava/lang/String;)V",
-                &[JObject::null().into()],
-            )
-            .unwrap()
-            .v()
-            .unwrap();
-
-            Ok(())
+            env.call_static_method("iors/IoRsTests", "itWorks", "()I", &[])
+                .unwrap()
+                .i()
         })
         .unwrap();
+
+    assert_eq!(res, 111);
 }
