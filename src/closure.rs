@@ -3,7 +3,6 @@ use jni::objects::JValue;
 use jni::{objects::JObject, JNIEnv};
 use std::sync::MutexGuard;
 
-// todo: naming
 // todo: the *_rust_field methods are doing a lot of lookups :/ we may want to do this ourselves
 //   and add caching
 

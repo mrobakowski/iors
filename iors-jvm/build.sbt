@@ -52,3 +52,4 @@ assemblyJarName in (Test, assembly) := s"${name.value}-test-${version.value}.jar
 scalaSource in Jmh := baseDirectory.value / "src" / "benchmark" / "scala"
 
 javaOptions in run += "-Djava.library.path=../target/release"
+//javaOptions in run += "-Xcheck:jni"

@@ -62,3 +62,32 @@ fn jni_works() {
 
     assert_eq!(res, 111);
 }
+
+#[test]
+fn expensive_stuff_for_profiling() {
+    let lib_path = format!(
+        "-Djava.library.path={}",
+        IORS_PATH.parent().unwrap().display(),
+    );
+    let jar_path = format!("-Djava.class.path={}", JAR_PATH.deref().display());
+
+    let jvm = Arc::new(
+        JavaVM::new(
+            InitArgsBuilder::new()
+                .option(&lib_path)
+                .option(&jar_path)
+                .build()
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    let executor = Executor::new(jvm);
+
+    executor
+        .with_attached(|env| {
+            env.call_static_method("iors/IoRsTests", "expensive", "()V", &[])
+                .unwrap()
+                .v()
+        })
+        .unwrap();
+}
