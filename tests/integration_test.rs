@@ -1,3 +1,5 @@
+#![feature(bool_to_option)]
+
 use jni::objects::JObject;
 use jni::{Executor, InitArgsBuilder, JavaVM};
 use once_cell::sync::Lazy;
@@ -7,7 +9,15 @@ use std::{env, path::PathBuf, sync::Arc};
 
 static IORS_PATH: Lazy<PathBuf> = Lazy::new(test_cdylib::build_current_project);
 static JAR_PATH: Lazy<PathBuf> = Lazy::new(|| {
-    let sbt_path = env::var("SBT_PATH").expect("SBT_PATH must be set and pointing to the sbt jar");
+    let sbt_path = env::var("SBT_PATH")
+        .or_else(|_| {
+            const UBUNTU_PATH: &str = "/usr/share/sbt/bin/sbt-launch.jar";
+            PathBuf::from(UBUNTU_PATH)
+                .is_file()
+                .then(|| UBUNTU_PATH.into())
+                .ok_or("sbt not found on the ubuntu installation path")
+        })
+        .expect("SBT_PATH must be set and pointing to the sbt jar");
     let java = env::var("JAVA_HOME").map_or("java".into(), |p| {
         let mut p = PathBuf::from(p);
         p.push("bin");
@@ -15,11 +25,13 @@ static JAR_PATH: Lazy<PathBuf> = Lazy::new(|| {
         p.to_string_lossy().to_string()
     });
 
+    println!("Building iors-jvm...");
     Command::new(java)
         .args(&["-jar", &sbt_path, "assembly"])
         .current_dir("./iors-jvm")
         .status()
         .unwrap();
+    println!("iors-jvm built!");
 
     PathBuf::from("./iors-jvm/target/scala-2.13/iors-jvm-assembly-0.1.jar")
 });
